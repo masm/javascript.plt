@@ -98,6 +98,13 @@
   (or (valid-identifier-start? ch)
       (char-numeric? ch)))
 
+(define (valid-identifier-string? id-str)
+  (let ([chars (string->list id-str)])
+    (and (pair? chars)
+         (valid-identifier-start? (car chars))
+         (andmap valid-identifier-part? (cdr chars))
+         (not (memq (string->symbol id-str) (lexical-keywords))))))
+
 ;; symbol -> boolean
 (define (valid-identifier? id)
   (let ([chars (string->list (symbol->string id))])
@@ -247,6 +254,7 @@
  [Term=? (Term/X? Term/X? . -> . boolean?)])
 
 (provide/contract
+ [valid-identifier-string? (string? . -> . boolean?)]
  [valid-identifier? (symbol? . -> . boolean?)]
  [check-valid-identifier! (symbol? symbol? syntax? . -> . symbol?)])
 

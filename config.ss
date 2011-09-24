@@ -1,7 +1,6 @@
 #lang scheme/base
 
 (require (planet cobbe/contract-utils:1/contract-utils)
-         (planet dherman/parameter:1:3)
          scheme/contract
          "private/config.ss")
 
@@ -20,4 +19,4 @@
                   [debug-unbound-references? (parameter/c boolean?)])
 
 (provide/contract [current-debug-port (-> output-port?)]
-                  [ecma-strict? (pseudo-parameter/c boolean?)])
+                  [ecma-strict? (->* () (boolean?) boolean?)])

@@ -1,7 +1,35 @@
 #lang scheme/base
 
-(require (planet dherman/parameter:1:3)
+(require (for-syntax scheme/base)
+         (for-syntax syntax/struct)
          (only-in srfi/1/list lset-adjoin))
+
+;;; This was copied form the parameter.plt planet package's main.ss
+
+(define-struct pseudo-parameter (getter setter)
+  #:property prop:procedure (case-lambda
+                              [(pp) ((pseudo-parameter-getter pp))]
+                              [(pp x) ((pseudo-parameter-setter pp) x)]))
+
+(define-syntax (define-parameter-set stx)
+  (syntax-case stx ()
+    [(define-parameter-set struct current (param default . maybe-guard) ...)
+     (with-syntax ([(struct:pset make-pset pset? get-field ...)
+                    (build-struct-names #'struct (syntax->list #'(param ...)) #f #t stx)])
+       #'(begin
+           (define param (make-parameter default . maybe-guard)) ...
+           (define-struct struct (param ...) #:prefab)
+           (define current
+             (make-pseudo-parameter
+              (lambda ()
+                (make-pset (param) ...))
+              (lambda (x)
+                (unless (pset? x)
+                  (error 'current "expected a parameter set of type ~a, received: ~v" 'struct x))
+                (param (get-field x)) ...
+                x)))))]))
+
+;;;
 
 (provide (except-out (all-defined-out) default-keywords keyword-guard add-keyword remove-keyword (struct-out config)))
 
@@ -95,14 +123,15 @@
   (equal? c default-config))
 
 (define ecma-strict?
-  (make-pseudo-parameter (lambda ()
-                           (not (or (allow-anonymous-function-source-elements?)
-                                    (infer-do-while-semicolon?)
-                                    (enable-extended-catch-statements?)
-                                    (allow-nested-function-declarations?))))
-                         (lambda (b)
-                           (let ([non-strict? (not b)])
-                             (allow-anonymous-function-source-elements? non-strict?)
-                             (infer-do-while-semicolon? non-strict?)
-                             (enable-extended-catch-statements? non-strict?)
-                             (allow-nested-function-declarations? non-strict?)))))
+  (case-lambda
+    [()
+     (not (or (allow-anonymous-function-source-elements?)
+              (infer-do-while-semicolon?)
+              (enable-extended-catch-statements?)
+              (allow-nested-function-declarations?)))]
+    [(b)
+     (let ([non-strict? (not b)])
+       (allow-anonymous-function-source-elements? non-strict?)
+       (infer-do-while-semicolon? non-strict?)
+       (enable-extended-catch-statements? non-strict?)
+       (allow-nested-function-declarations? non-strict?))]))

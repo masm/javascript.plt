@@ -47,6 +47,8 @@
 
 (define expression-precedences
   '(;; binds loosest
+    (LetExpression)
+    (ListExpression)
     (AssignmentExpression)
     (ConditionalExpression)
     (InfixExpression)
@@ -137,9 +139,9 @@
     [param ((param) elts)]
     [else (error 'format-map "not a list")]))
 
-(define (format/extensions x extensions)
+(define (format/extensions x extensions [exn #f])
   (if (null? extensions)
-      (fail-match x)
+      (if exn (raise exn) (fail-match x))
       (with-handlers ([exn:misc:match? (lambda (exn)
                                          (format/extensions x (cdr extensions)))])
         ((car extensions) x))))
@@ -175,7 +177,11 @@
                      (format-map format-source-element body formatters/StatementList))
                line
                (text "}"))]
-    ;; TODO: LetDeclaration
+    ;; TODO: LetDeclaration with function declarations
+    [(struct LetDeclaration (_ bindings))
+     (h-append (text "let ")
+               (h-concat (apply-infix (text ", ") (map format-variable-initializer bindings)))
+               (text ";"))]
     [(struct VariableDeclaration (_ bindings))
      (h-append (text "var ")
                (h-concat (apply-infix (text ", ") (map format-variable-initializer bindings)))
@@ -184,7 +190,7 @@
 ;; format-expression : Expression -> any
 (define (format-expression expr)
   (with-handlers ([exn:misc:match? (lambda (exn)
-                                     (format/extensions expr (formatters/Expression)))])
+                                     (format/extensions expr (formatters/Expression) exn))])
     (match expr
       [(struct StringLiteral (_ value))
        (text (format "~v" value))] ;; TODO: use the real lexical definition
@@ -231,10 +237,18 @@
       [(struct VarReference (_ id))
        (format-identifier id)]
       [(struct BracketReference (_ container key))
-       (h-append (format-subexpression container expr)
-                 (text "[")
-                 (format-expression key)
-                 (text "]"))]
+       (match key
+         [(struct StringLiteral (_ str)) (=> abort)
+          (if (and (valid-identifier-string? str)
+                   (not (NumericLiteral? container)))
+              (h-append (format-subexpression container expr)
+                        (text ".")
+                        (text str))
+              (abort))]
+         [_ (h-append (format-subexpression container expr)
+                      (text "[")
+                      (format-expression key)
+                      (text "]"))])]
       [(struct DotReference (_ container id))
        ;; TODO: if (not (valid-identifier? id)) then (make-BracketReference loc container (make-StringLiteral (Term-location id) (symbol->string (Identifier-name id))))
        (h-append (format-subexpression container expr)
@@ -253,6 +267,7 @@
                  (text (symbol->string operator)))]
       [(struct PrefixExpression (_ operator expression))
        (h-append (text (symbol->string operator))
+                 (text (if (memq operator '(delete typeof void)) " " ""))
                  (format-subexpression expression expr))]
       [(struct InfixExpression (_ left operator right))
        (h-append (if (InfixExpression? left)
@@ -285,19 +300,18 @@
                  (text " ")
                  (format-subexpression rhs expr))]
       [(struct FunctionExpression (_ name args body))
-       (align
-        (h-append (text "function")
-                  (if name
-                      (h-append (text " ")
-                                (format-identifier name))
-                      empty)
-                  (text "(")
-                  (h-concat (apply-infix (text ", ") (map format-identifier args)))
-                  (text ") {")
-                  (nest (current-indentation-width)
-                        (format-map format-source-element body formatters/StatementList))
-                  line
-                  (text "}")))]
+       (h-append (text "function")
+                 (if name
+                     (h-append (text " ")
+                               (format-identifier name))
+                     empty)
+                 (text "(")
+                 (h-concat (apply-infix (text ", ") (map format-identifier args)))
+                 (text ") {")
+                 (nest (current-indentation-width)
+                       (format-map format-source-element body formatters/StatementList))
+                 line
+                 (text "}"))]
       [(struct LetExpression (_ bindings body))
        (h-append (text "let (")
                  (h-concat (apply-infix (text ", ") (map format-variable-initializer bindings)))
@@ -329,13 +343,30 @@
                 (text ")"))
       (format-expression expr)))
 
+(define (expression-starts-with-brace? expression)
+  (or (ObjectLiteral? expression)
+      (and (BracketReference? expression)
+           (expression-starts-with-brace? (BracketReference-container expression)))
+      (and (DotReference? expression)
+           (expression-starts-with-brace? (DotReference-container expression)))
+      (and (PostfixExpression? expression)
+           (expression-starts-with-brace? (PostfixExpression-expression expression)))
+      (and (InfixExpression? expression)
+           (expression-starts-with-brace? (InfixExpression-left expression)))
+      (and (ConditionalExpression? expression)
+           (expression-starts-with-brace? (ConditionalExpression-test expression)))
+      (and (AssignmentExpression? expression)
+           (expression-starts-with-brace? (AssignmentExpression-lhs expression)))
+      (and (CallExpression? expression)
+           (expression-starts-with-brace? (CallExpression-method expression)))))
+
 ;; format-statement : Statement -> any
 ;; POSTCONDITIONS:
 ;;   - statement output includes its own semicolon if appropriate
 ;;   - statement output is not newline-terminated
 (define (format-statement stmt)
   (with-handlers ([exn:misc:match? (lambda (exn)
-                                     (format/extensions stmt (formatters/Statement)))])
+                                     (format/extensions stmt (formatters/Statement) exn))])
     (match stmt
       [(struct BlockStatement (_ statements))
        (if (null? statements)
@@ -354,20 +385,30 @@
       [(struct EmptyStatement (_))
        (text ";")]
       [(struct ExpressionStatement (_ expression))
-       (h-append (format-expression expression)
-                 (text ";"))]
+       (if (or (expression-starts-with-brace? expression)
+               (FunctionExpression? expression))
+           (h-append (text "(")
+                     (format-expression expression)
+                     (text ");"))
+           (h-append (format-expression expression)
+                     (text ";")))]
       [(struct IfStatement (_ test consequent alternate))
        (h-append (text "if (")
                  (format-expression test)
                  (text ")")
-                 (format-nested-substatement consequent)
-                 line
+                 (format-if-consequent consequent alternate)
+                 (cond
+                   [(or (BlockStatement? consequent) (IfStatement? consequent))
+                    empty]
+                   [alternate
+                    line]
+                   [else empty])
                  (cond
                    [(IfStatement? alternate)
-                    (h-append (text "else ")
+                    (h-append (text (if (BlockStatement? consequent) " else " "else "))
                               (format-statement alternate))]
                    [alternate
-                    (h-append (text "else")
+                    (h-append (text (if (BlockStatement? consequent) " else" "else"))
                               (format-nested-substatement alternate))]
                    [else empty]))]
       [(struct DoWhileStatement (_ body test))
@@ -391,6 +432,8 @@
       [(struct ForStatement (_ init test incr body))
        (h-append (text "for (")
                  (cond
+                   [(not init)
+                    empty]
                    [(Expression? init)
                     (format-expression init)]
                    [(VariableDeclaration? init)
@@ -439,6 +482,13 @@
                                (format-expression value))
                      empty)
                  (text ";"))]
+      [(struct LetStatement (_ bindings body))
+       (h-append (text "let (")
+                 (h-concat (apply-infix (text ", ") (map format-variable-initializer bindings)))
+                 (text ")")
+                 (nest (current-indentation-width)
+                       (h-append line
+                                 (format-substatement body))))]
       [(struct WithStatement (_ context body))
        (h-append (text "with (")
                  (format-expression context)
@@ -450,15 +500,16 @@
        (h-append (text "switch (")
                  (format-expression expression)
                  (text ") {")
-                 (nest (current-indentation-width)
-                       (h-append line
-                                 (format-case-clause (car cases))
-                                 (format-map (lambda (case)
-                                               (h-append line
-                                                         (format-case-clause case)))
-                                             (cdr cases))))
-                 line
-                 (text "}"))]
+                 (if (null? cases)
+                     (text "}")
+                     (h-append line
+                               (format-case-clause (car cases))
+                               (format-map (lambda (case)
+                                             (h-append line
+                                                       (format-case-clause case)))
+                                           (cdr cases))
+                               line
+                               (text "}"))))]
       [(struct LabelledStatement (_ label statement))
        (h-append (format-identifier label)
                  (text ":")
@@ -471,21 +522,37 @@
                  (text ";"))]
       [(struct TryStatement (_ body catches finally))
        (h-append (text "try")
-                 (format-nested-substatement body)
+                 (if (BlockStatement? body)
+                     (format-nested-substatement body)
+                     (format-nested-substatement (make-BlockStatement #f (list body))))
                  (format-map (lambda (catch)
                                (h-append line
                                          (match-let ([(struct CatchClause (_ id body)) catch])
                                            (h-append (text "catch (")
                                                      (format-identifier id)
                                                      (text ")")
-                                                     (format-nested-substatement body)))))
+                                                     (if (BlockStatement? body)
+                                                         (format-nested-substatement body)
+                                                         (format-nested-substatement (make-BlockStatement #f (list body))))))))
                              catches)
                  (if finally
                      (h-append line
                                (text "finally")
-                               (format-nested-substatement finally))
+                               (if (BlockStatement? finally)
+                                   (format-nested-substatement finally)
+                                   (format-nested-substatement (make-BlockStatement #f (list finally)))))
                      empty))]
       )))
+
+(define (format-if-consequent consequent alternate)
+  (if (and alternate (IfStatement? consequent))
+      (h-append (nest (current-indentation-width)
+                      (h-append (text " {")
+                                line
+                                (format-substatement consequent)))
+                line
+                (text "} "))
+      (format-nested-substatement consequent)))
 
 ;; format-nested-substatement : SubStatement -> any
 ;; PRECONDITION:
@@ -518,11 +585,17 @@
          (h-append (text "case ") (format-expression question))
          (text "default"))
      (text ":")
-     (if (= (length answer) 1)
-         (format-nested-substatement (car answer))
-         (nest (current-indentation-width)
-               (h-append line
-                         (format-map format-substatement answer formatters/StatementList)))))))
+     (cond [(null? answer) empty]
+           [(null? (cdr answer))
+            (format-nested-substatement (car answer))]
+           [else
+            (nest (current-indentation-width)
+                  (h-append line
+                            (format-substatement (car answer))
+                            (format-map (lambda (s)
+                                          (h-append line
+                                                    (format-substatement s)))
+                                        (cdr answer) formatters/StatementList)))]))))
 
 ;; format-property : Property -> doc
 (define (format-property pair)

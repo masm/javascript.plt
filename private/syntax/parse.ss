@@ -793,8 +793,7 @@
       (let ([open-paren (send t must-match '\()]
             [expr (parse-list-expression)]
             [close-paren (send t must-match '\))])
-        (make-ParenExpression (@ open-paren close-paren)
-                              expr)))
+        expr))
 
     ;; parse-expression : -> Expression
     (define/public (parse-expression)
